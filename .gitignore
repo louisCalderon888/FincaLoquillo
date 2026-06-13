@@ -26,3 +26,8 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Google OAuth y tokens de credenciales
+config/token.json
+config/client_secret.json
+config/google_credentials.json

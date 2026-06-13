@@ -18,7 +18,12 @@ if api_key:
 else:
     logger.warning("GEMINI_API_KEY no encontrada en las variables de entorno.")
 
-from agent.tools import verificar_disponibilidad_glamping, obtener_imagen_glamping, registrar_reserva_sheets
+from agent.tools import (
+    verificar_disponibilidad_glamping,
+    verificar_disponibilidad_rango,
+    obtener_imagen_glamping,
+    registrar_reserva
+)
 
 
 def cargar_config_prompts() -> dict:
@@ -82,11 +87,15 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
 
     try:
         # Declaramos las herramientas que Gemini puede usar
-        # Para mantener el flujo asíncrono robusto y rápido, usaremos el SDK de Google Generative AI declarando las funciones nativas.
         model = genai.GenerativeModel(
             model_name="gemini-2.5-flash",
             system_instruction=system_prompt,
-            tools=[verificar_disponibilidad_glamping, obtener_imagen_glamping, registrar_reserva_sheets]
+            tools=[
+                verificar_disponibilidad_glamping,
+                verificar_disponibilidad_rango,
+                obtener_imagen_glamping,
+                registrar_reserva
+            ]
         )
 
         import asyncio
@@ -102,7 +111,6 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
         respuesta_texto = ""
 
         # Verificar si Gemini decidió llamar a alguna función (Function Call)
-        # Si Gemini llama a una función, la ejecutamos y le devolvemos el resultado a Gemini para que termine de dar la respuesta final al cliente.
         if response.candidates and response.candidates[0].content.parts:
             part = response.candidates[0].content.parts[0]
             
@@ -120,8 +128,6 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
                     fecha = args.get("fecha")
                     resultado_funcion = verificar_disponibilidad_glamping(glamping, fecha)
                     
-                    # Volver a llamar a Gemini pasándole el resultado de la función
-                    # Añadir la respuesta del modelo solicitando la llamada y la respuesta de la función al historial
                     contents.append(response.candidates[0].content)
                     contents.append({
                         "role": "function",
@@ -139,14 +145,36 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
                     )
                     respuesta_texto = response_final.text
                     
-                elif name == "registrar_reserva_sheets":
-                    resultado_funcion = registrar_reserva_sheets(
+                elif name == "verificar_disponibilidad_rango":
+                    glamping = args.get("glamping")
+                    resultado_funcion = verificar_disponibilidad_rango(glamping)
+                    
+                    contents.append(response.candidates[0].content)
+                    contents.append({
+                        "role": "function",
+                        "parts": [{
+                            "function_response": {
+                                "name": "verificar_disponibilidad_rango",
+                                "response": {"result": resultado_funcion}
+                            }
+                        }]
+                    })
+                    
+                    response_final = await loop.run_in_executor(
+                        None,
+                        lambda: model.generate_content(contents)
+                    )
+                    respuesta_texto = response_final.text
+
+                elif name == "registrar_reserva":
+                    resultado_funcion = registrar_reserva(
                         nombre_cliente=args.get("nombre_cliente", ""),
                         telefono=args.get("telefono", ""),
+                        email=args.get("email", ""),
+                        whatsapp=args.get("whatsapp", ""),
                         glamping=args.get("glamping", ""),
                         fecha_reserva=args.get("fecha_reserva", ""),
                         num_personas=args.get("num_personas", "1"),
-                        almuerzos=args.get("almuerzos", "No"),
                         notas=args.get("notas", "")
                     )
                     contents.append(response.candidates[0].content)
@@ -154,7 +182,7 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
                         "role": "function",
                         "parts": [{
                             "function_response": {
-                                "name": "registrar_reserva_sheets",
+                                "name": "registrar_reserva",
                                 "response": {"result": resultado_funcion}
                             }
                         }]
@@ -169,7 +197,6 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
                     glamping = args.get("glamping")
                     media_url = obtener_imagen_glamping(glamping)
                     
-                    # Le informamos a Gemini que obtuvimos la foto para que complemente la respuesta
                     resultado_funcion = f"URL de imagen obtenida con éxito: {media_url}. Envía un mensaje amigable al cliente confirmando el envío de la foto."
                     contents.append(response.candidates[0].content)
                     contents.append({
