@@ -68,17 +68,60 @@ def buscar_en_knowledge(consulta: str) -> str:
 # AUXILIAR: AUTENTICACIÓN GOOGLE APIS CON OAUTH2
 # ─────────────────────────────────────────────────────────────
 
-def _obtener_credenciales_google():
+def _construir_credenciales_desde_dict(creds_data: dict, scopes: list):
     """
-    Obtiene credenciales de Google.
-    1. Intenta cargar desde la variable de entorno GOOGLE_CREDENTIALS_JSON (soporta Service Account u OAuth2 Token).
-    2. Intenta cargar desde el archivo local config/token.json.
-    3. Si no existe y está en local, inicia el flujo interactivo de OAuth2 Desktop con config/client_secret.json.
+    Construye un objeto Credentials desde un dict JSON.
+    Soporta los formatos:
+    - service_account (cuenta de servicio)
+    - authorized_user (gcloud ADC, formato con client_id/client_secret/refresh_token)
+    - oauth2 token guardado por google_auth_oauthlib
     """
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
     from google.oauth2 import service_account
+
+    tipo = creds_data.get("type", "")
+
+    if tipo == "service_account":
+        logger.info("Tipo: service_account")
+        return service_account.Credentials.from_service_account_info(creds_data, scopes=scopes)
+
+    # authorized_user (gcloud ADC) o token guardado por oauthlib
+    # El formato de gcloud no incluye token_uri, lo añadimos explícitamente
+    if not creds_data.get("token_uri"):
+        creds_data["token_uri"] = "https://oauth2.googleapis.com/token"
+
+    try:
+        creds = Credentials.from_authorized_user_info(creds_data, scopes=scopes)
+        logger.info("Credenciales de usuario OAuth2 construidas correctamente")
+        if creds.expired or not creds.token:
+            creds.refresh(Request())
+            logger.info("Token refrescado correctamente")
+        return creds
+    except Exception:
+        # Construcción manual (para formato authorized_user de gcloud)
+        creds = Credentials(
+            token=creds_data.get("access_token"),
+            refresh_token=creds_data.get("refresh_token"),
+            client_id=creds_data.get("client_id"),
+            client_secret=creds_data.get("client_secret"),
+            token_uri=creds_data.get("token_uri", "https://oauth2.googleapis.com/token"),
+            scopes=scopes
+        )
+        if not creds.token or creds.expired:
+            creds.refresh(Request())
+            logger.info("Token refrescado correctamente (construcción manual)")
+        return creds
+
+
+def _obtener_credenciales_google():
+    """
+    Obtiene credenciales de Google.
+    1. Intenta cargar desde la variable de entorno GOOGLE_CREDENTIALS_JSON.
+    2. Intenta cargar desde el archivo local config/token.json.
+    3. Si no existe y está en local, inicia el flujo interactivo de OAuth2 Desktop con config/client_secret.json.
+    """
+    from google_auth_oauthlib.flow import InstalledAppFlow
 
     SCOPES = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -91,14 +134,11 @@ def _obtener_credenciales_google():
     if google_creds_env:
         try:
             creds_data = json.loads(google_creds_env)
-            if creds_data.get("type") == "service_account":
-                logger.info("Autenticando con Cuenta de Servicio desde GOOGLE_CREDENTIALS_JSON")
-                return service_account.Credentials.from_service_account_info(creds_data, scopes=SCOPES)
-            else:
-                logger.info("Autenticando con Credenciales de Usuario (OAuth2) desde GOOGLE_CREDENTIALS_JSON")
-                return Credentials.from_authorized_user_info(creds_data, scopes=SCOPES)
+            creds = _construir_credenciales_desde_dict(creds_data, SCOPES)
+            if creds:
+                return creds
         except Exception as e:
-            logger.error(f"Error cargando credenciales desde GOOGLE_CREDENTIALS_JSON de env: {e}")
+            logger.error(f"Error cargando credenciales desde GOOGLE_CREDENTIALS_JSON: {e}")
 
     creds = None
     token_path = "config/token.json"
@@ -107,10 +147,13 @@ def _obtener_credenciales_google():
     # 2. Intentar cargar credenciales del token.json existente
     if os.path.exists(token_path):
         try:
-            creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+            with open(token_path, "r") as f:
+                token_data = json.load(f)
+            creds = _construir_credenciales_desde_dict(token_data, SCOPES)
             logger.info("Cargadas credenciales desde config/token.json")
         except Exception as e:
             logger.error(f"Error cargando token.json: {e}")
+            creds = None
 
     # Si no hay credenciales válidas, solicitar al usuario que inicie sesión
     if not creds or not creds.valid:
