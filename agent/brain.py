@@ -121,51 +121,17 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
                 args = function_call.args
                 
                 logger.info(f"Gemini solicitó llamar a la función: {name} con argumentos {args}")
-                
-                # Ejecutar la función solicitada
+                 # Ejecutar la función solicitada
+                resultado_funcion = ""
                 if name == "verificar_disponibilidad_glamping":
                     glamping = args.get("glamping")
                     fecha = args.get("fecha")
                     resultado_funcion = verificar_disponibilidad_glamping(glamping, fecha)
                     
-                    contents.append(response.candidates[0].content)
-                    contents.append({
-                        "role": "function",
-                        "parts": [{
-                            "function_response": {
-                                "name": "verificar_disponibilidad_glamping",
-                                "response": {"result": resultado_funcion}
-                            }
-                        }]
-                    })
-                    
-                    response_final = await loop.run_in_executor(
-                        None,
-                        lambda: model.generate_content(contents)
-                    )
-                    respuesta_texto = response_final.text
-                    
                 elif name == "verificar_disponibilidad_rango":
                     glamping = args.get("glamping")
                     resultado_funcion = verificar_disponibilidad_rango(glamping)
-                    
-                    contents.append(response.candidates[0].content)
-                    contents.append({
-                        "role": "function",
-                        "parts": [{
-                            "function_response": {
-                                "name": "verificar_disponibilidad_rango",
-                                "response": {"result": resultado_funcion}
-                            }
-                        }]
-                    })
-                    
-                    response_final = await loop.run_in_executor(
-                        None,
-                        lambda: model.generate_content(contents)
-                    )
-                    respuesta_texto = response_final.text
-
+ 
                 elif name == "registrar_reserva":
                     resultado_funcion = registrar_reserva(
                         nombre_cliente=args.get("nombre_cliente", ""),
@@ -177,43 +143,37 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
                         num_personas=args.get("num_personas", "1"),
                         notas=args.get("notas", "")
                     )
-                    contents.append(response.candidates[0].content)
-                    contents.append({
-                        "role": "function",
-                        "parts": [{
-                            "function_response": {
-                                "name": "registrar_reserva",
-                                "response": {"result": resultado_funcion}
-                            }
-                        }]
-                    })
-                    response_final = await loop.run_in_executor(
-                        None,
-                        lambda: model.generate_content(contents)
-                    )
-                    respuesta_texto = response_final.text
-
+ 
                 elif name == "obtener_imagen_glamping":
                     glamping = args.get("glamping")
                     media_url = obtener_imagen_glamping(glamping)
-                    
                     resultado_funcion = f"URL de imagen obtenida con éxito: {media_url}. Envía un mensaje amigable al cliente confirmando el envío de la foto."
-                    contents.append(response.candidates[0].content)
-                    contents.append({
-                        "role": "function",
-                        "parts": [{
-                            "function_response": {
-                                "name": "obtener_imagen_glamping",
-                                "response": {"result": resultado_funcion}
-                            }
-                        }]
-                    })
-                    
-                    response_final = await loop.run_in_executor(
-                        None,
-                        lambda: model.generate_content(contents)
-                    )
-                    respuesta_texto = response_final.text
+
+                # Agregar la llamada a la función y el resultado al historial en formato dict compatible
+                contents.append({
+                    "role": "model",
+                    "parts": [{
+                        "function_call": {
+                            "name": name,
+                            "args": dict(args)
+                        }
+                    }]
+                })
+                contents.append({
+                    "role": "function",
+                    "parts": [{
+                        "function_response": {
+                            "name": name,
+                            "response": {"result": resultado_funcion}
+                        }
+                    }]
+                })
+                
+                response_final = await loop.run_in_executor(
+                    None,
+                    lambda: model.generate_content(contents)
+                )
+                respuesta_texto = response_final.text
             else:
                 respuesta_texto = response.text
         else:
