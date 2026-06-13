@@ -18,7 +18,7 @@ if api_key:
 else:
     logger.warning("GEMINI_API_KEY no encontrada en las variables de entorno.")
 
-from agent.tools import verificar_disponibilidad_glamping, obtener_imagen_glamping
+from agent.tools import verificar_disponibilidad_glamping, obtener_imagen_glamping, registrar_reserva_sheets
 
 
 def cargar_config_prompts() -> dict:
@@ -86,7 +86,7 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
         model = genai.GenerativeModel(
             model_name="gemini-2.5-flash",
             system_instruction=system_prompt,
-            tools=[verificar_disponibilidad_glamping, obtener_imagen_glamping]
+            tools=[verificar_disponibilidad_glamping, obtener_imagen_glamping, registrar_reserva_sheets]
         )
 
         import asyncio
@@ -139,6 +139,32 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
                     )
                     respuesta_texto = response_final.text
                     
+                elif name == "registrar_reserva_sheets":
+                    resultado_funcion = registrar_reserva_sheets(
+                        nombre_cliente=args.get("nombre_cliente", ""),
+                        telefono=args.get("telefono", ""),
+                        glamping=args.get("glamping", ""),
+                        fecha_reserva=args.get("fecha_reserva", ""),
+                        num_personas=args.get("num_personas", "1"),
+                        almuerzos=args.get("almuerzos", "No"),
+                        notas=args.get("notas", "")
+                    )
+                    contents.append(response.candidates[0].content)
+                    contents.append({
+                        "role": "function",
+                        "parts": [{
+                            "function_response": {
+                                "name": "registrar_reserva_sheets",
+                                "response": {"result": resultado_funcion}
+                            }
+                        }]
+                    })
+                    response_final = await loop.run_in_executor(
+                        None,
+                        lambda: model.generate_content(contents)
+                    )
+                    respuesta_texto = response_final.text
+
                 elif name == "obtener_imagen_glamping":
                     glamping = args.get("glamping")
                     media_url = obtener_imagen_glamping(glamping)
