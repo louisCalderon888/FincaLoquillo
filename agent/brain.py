@@ -1,14 +1,10 @@
-# agent/brain.py — Cerebro del agente: conexión con Gemini API
+# agent/brain.py — Cerebro del agente con soporte de Function Calling para Gemini API
 # Generado por AgentKit
-
-"""
-Lógica de IA del agente. Lee el system prompt de prompts.yaml
-y genera respuestas usando la API de Google Gemini.
-"""
 
 import os
 import yaml
 import logging
+import json
 import google.generativeai as genai
 from dotenv import load_dotenv
 
@@ -21,6 +17,8 @@ if api_key:
     genai.configure(api_key=api_key)
 else:
     logger.warning("GEMINI_API_KEY no encontrada en las variables de entorno.")
+
+from agent.tools import verificar_disponibilidad_glamping, obtener_imagen_glamping
 
 
 def cargar_config_prompts() -> dict:
@@ -51,56 +49,125 @@ def obtener_mensaje_fallback() -> str:
     return config.get("fallback_message", "Disculpa, no entendí tu mensaje. ¿Podrías reformularlo?")
 
 
-async def generar_respuesta(mensaje: str, historial: list[dict]) -> str:
+async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, str]:
     """
-    Genera una respuesta usando Gemini API.
+    Genera una respuesta usando Gemini API y soporta retorno opcional de una URL de imagen (media_url).
+    
+    Returns:
+        tuple: (texto_de_respuesta, media_url_opcional)
     """
     if not mensaje or len(mensaje.strip()) < 2:
-        return obtener_mensaje_fallback()
+        return obtener_mensaje_fallback(), None
 
     api_key_env = os.getenv("GEMINI_API_KEY")
     if not api_key_env:
-        return "[Modo Simulado - Loqui]: ¡Hola! Para responderte de verdad necesito que agregues tu GEMINI_API_KEY en el archivo .env. Por ahora, simulo decirte que Finca Loquillo es hermosa, cobramos $10.000 la entrada y ofrecemos Glampings espectaculares desde $180.000. ¿Qué te gustaría saber?"
+        return "[Modo Simulado - Loqui]: ¡Hola! Para responderte con IA necesito la clave de Gemini en el .env.", None
 
     system_prompt = cargar_system_prompt()
 
-    # Formatear el historial de chat al formato esperado por Gemini (contents)
+    # Formatear el historial
     contents = []
     for msg in historial:
-        # Mapear roles: SQLAlchemy almacena 'assistant', Gemini espera 'model'
         role = "user" if msg["role"] == "user" else "model"
         contents.append({
             "role": role,
             "parts": [msg["content"]]
         })
 
-    # Agregar el mensaje actual del usuario
+    # Mensaje actual
     contents.append({
         "role": "user",
         "parts": [mensaje]
     })
 
     try:
-        # Inicializar el modelo con las instrucciones del sistema (system_instruction)
+        # Declaramos las herramientas que Gemini puede usar
+        # Para mantener el flujo asíncrono robusto y rápido, usaremos el SDK de Google Generative AI declarando las funciones nativas.
         model = genai.GenerativeModel(
             model_name="gemini-2.5-flash",
-            system_instruction=system_prompt
+            system_instruction=system_prompt,
+            tools=[verificar_disponibilidad_glamping, obtener_imagen_glamping]
         )
 
-        # Usar run_in_executor para ejecutar la llamada síncrona de Gemini de manera asíncrona
         import asyncio
         loop = asyncio.get_event_loop()
         
-        # Llamar a la API de Gemini
+        # Llamar a Gemini de forma asíncrona
         response = await loop.run_in_executor(
             None,
             lambda: model.generate_content(contents)
         )
 
-        respuesta = response.text
-        logger.info("Respuesta generada con Gemini con éxito")
-        return respuesta
+        media_url = None
+        respuesta_texto = ""
+
+        # Verificar si Gemini decidió llamar a alguna función (Function Call)
+        # Si Gemini llama a una función, la ejecutamos y le devolvemos el resultado a Gemini para que termine de dar la respuesta final al cliente.
+        if response.candidates and response.candidates[0].content.parts:
+            part = response.candidates[0].content.parts[0]
+            
+            # ¿Es una llamada a función?
+            if part.function_call:
+                function_call = part.function_call
+                name = function_call.name
+                args = function_call.args
+                
+                logger.info(f"Gemini solicitó llamar a la función: {name} con argumentos {args}")
+                
+                # Ejecutar la función solicitada
+                if name == "verificar_disponibilidad_glamping":
+                    glamping = args.get("glamping")
+                    fecha = args.get("fecha")
+                    resultado_funcion = verificar_disponibilidad_glamping(glamping, fecha)
+                    
+                    # Volver a llamar a Gemini pasándole el resultado de la función
+                    # Añadir la respuesta del modelo solicitando la llamada y la respuesta de la función al historial
+                    contents.append(response.candidates[0].content)
+                    contents.append({
+                        "role": "function",
+                        "parts": [{
+                            "function_response": {
+                                "name": "verificar_disponibilidad_glamping",
+                                "response": {"result": resultado_funcion}
+                            }
+                        }]
+                    })
+                    
+                    response_final = await loop.run_in_executor(
+                        None,
+                        lambda: model.generate_content(contents)
+                    )
+                    respuesta_texto = response_final.text
+                    
+                elif name == "obtener_imagen_glamping":
+                    glamping = args.get("glamping")
+                    media_url = obtener_imagen_glamping(glamping)
+                    
+                    # Le informamos a Gemini que obtuvimos la foto para que complemente la respuesta
+                    resultado_funcion = f"URL de imagen obtenida con éxito: {media_url}. Envía un mensaje amigable al cliente confirmando el envío de la foto."
+                    contents.append(response.candidates[0].content)
+                    contents.append({
+                        "role": "function",
+                        "parts": [{
+                            "function_response": {
+                                "name": "obtener_imagen_glamping",
+                                "response": {"result": resultado_funcion}
+                            }
+                        }]
+                    })
+                    
+                    response_final = await loop.run_in_executor(
+                        None,
+                        lambda: model.generate_content(contents)
+                    )
+                    respuesta_texto = response_final.text
+            else:
+                respuesta_texto = response.text
+        else:
+            respuesta_texto = response.text
+
+        return respuesta_texto, media_url
 
     except Exception as e:
-        logger.error(f"Error Gemini API: {e}")
-        return obtener_mensaje_error()
+        logger.error(f"Error Gemini API con Function Calling: {e}")
+        return obtener_mensaje_error(), None
