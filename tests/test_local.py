@@ -61,8 +61,10 @@ async def main():
 
         # Generar respuesta
         print("\nLoqui: ", end="", flush=True)
-        respuesta = await generar_respuesta(mensaje, historial)
+        respuesta, media_url = await generar_respuesta(mensaje, historial)
         print(respuesta)
+        if media_url:
+            print(f"[Imagen adjunta: {media_url}]")
         print()
 
         # Guardar historial

@@ -20,9 +20,11 @@ async def test():
     print(f"Usuario: {mensaje}\n")
     
     historial = await obtener_historial(telefono)
-    respuesta = await generar_respuesta(mensaje, historial)
+    respuesta, media_url = await generar_respuesta(mensaje, historial)
     
     print(f"Loqui: {respuesta}")
+    if media_url:
+        print(f"[Imagen adjunta: {media_url}]")
 
 if __name__ == "__main__":
     if sys.platform == 'win32':
