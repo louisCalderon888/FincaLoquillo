@@ -139,9 +139,10 @@ def _obtener_credenciales_google():
     Obtiene credenciales de Google.
 
     Orden de prioridad:
-    1. Variable de entorno GOOGLE_CREDENTIALS_JSON (Railway / producción).
-    2. Archivo local config/token.json (desarrollo local).
-    3. Flujo interactivo OAuth2 Desktop con config/client_secret.json (solo si hay TTY).
+    1. GOOGLE_SERVICE_ACCOUNT_JSON (service account — recomendado, nunca expira)
+    2. GOOGLE_CREDENTIALS_JSON (OAuth2 en variable de entorno)
+    3. Archivo local config/token.json (desarrollo local)
+    4. Flujo interactivo OAuth2 Desktop con config/client_secret.json (solo si hay TTY)
     """
     from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -151,22 +152,57 @@ def _obtener_credenciales_google():
         "https://www.googleapis.com/auth/calendar"
     ]
 
-    def _validar_campos_minimos(data: dict) -> bool:
+    def _validar_service_account(data: dict) -> bool:
+        return (
+            data.get("type") == "service_account"
+            and data.get("private_key")
+            and data.get("client_email")
+        )
+
+    def _validar_oauth(data: dict) -> bool:
         campos = ["client_id", "client_secret", "refresh_token"]
         return all(data.get(c) for c in campos)
 
-    # 1. Intentar cargar desde la variable de entorno GOOGLE_CREDENTIALS_JSON
+    # ── PRIORIDAD 1: GOOGLE_SERVICE_ACCOUNT_JSON ──
+    sa_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if sa_json:
+        try:
+            sa_data = json.loads(sa_json)
+            if not _validar_service_account(sa_data):
+                logger.error(
+                    "GOOGLE_SERVICE_ACCOUNT_JSON no tiene formato de service account. "
+                    "Campos requeridos: type=service_account, private_key, client_email"
+                )
+            else:
+                creds = _construir_credenciales_desde_dict(sa_data, SCOPES)
+                if creds:
+                    logger.info(
+                        f"Credenciales cargadas desde GOOGLE_SERVICE_ACCOUNT_JSON (service account: {sa_data.get('client_email')})"
+                    )
+                    return creds
+        except json.JSONDecodeError as e:
+            logger.error(f"GOOGLE_SERVICE_ACCOUNT_JSON no es un JSON válido: {e}")
+        except Exception as e:
+            logger.error(f"Error cargando service account: {e}")
+
+    # ── PRIORIDAD 2: GOOGLE_CREDENTIALS_JSON (OAuth2) ──
     google_creds_env = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if google_creds_env:
         try:
             creds_data = json.loads(google_creds_env)
-            if not _validar_campos_minimos(creds_data):
-                logger.error("GOOGLE_CREDENTIALS_JSON no tiene los campos mínimos requeridos.")
-                return None
-            creds = _construir_credenciales_desde_dict(creds_data, SCOPES)
-            if creds:
-                logger.info("Credenciales cargadas desde variable de entorno GOOGLE_CREDENTIALS_JSON")
-                return creds
+            if creds_data.get("type") == "service_account":
+                if _validar_service_account(creds_data):
+                    creds = _construir_credenciales_desde_dict(creds_data, SCOPES)
+                    if creds:
+                        logger.info("Service account detectada en GOOGLE_CREDENTIALS_JSON")
+                        return creds
+            elif not _validar_oauth(creds_data):
+                logger.error("GOOGLE_CREDENTIALS_JSON no tiene client_id, client_secret ni refresh_token.")
+            else:
+                creds = _construir_credenciales_desde_dict(creds_data, SCOPES)
+                if creds:
+                    logger.info("Credenciales OAuth2 cargadas desde GOOGLE_CREDENTIALS_JSON")
+                    return creds
         except json.JSONDecodeError as e:
             logger.error(f"GOOGLE_CREDENTIALS_JSON no es un JSON válido: {e}")
         except Exception as e:
@@ -176,27 +212,30 @@ def _obtener_credenciales_google():
     token_path = "config/token.json"
     client_secret_path = "config/client_secret.json"
 
-    # 2. Intentar cargar credenciales del token.json existente
+    # ── PRIORIDAD 3: Archivo local token.json ──
     if os.path.exists(token_path):
         try:
             with open(token_path, "r") as f:
                 token_data = json.load(f)
-            if not _validar_campos_minimos(token_data):
+            if token_data.get("type") == "service_account" and _validar_service_account(token_data):
+                creds = _construir_credenciales_desde_dict(token_data, SCOPES)
+                logger.info("Service account cargada desde archivo local")
+            elif not _validar_oauth(token_data):
                 logger.error("El archivo de token local no tiene los campos mínimos requeridos.")
-                return None
-            creds = _construir_credenciales_desde_dict(token_data, SCOPES)
-            logger.info("Credenciales cargadas desde archivo de token local")
+            else:
+                creds = _construir_credenciales_desde_dict(token_data, SCOPES)
+                logger.info("Credenciales OAuth2 cargadas desde archivo de token local")
         except Exception as e:
             logger.error(f"Error cargando credenciales locales: {e}")
             creds = None
 
-    # Si no hay credenciales válidas, solicitar al usuario que inicie sesión
+    # Si no hay credenciales válidas, intentar refresh o flujo interactivo
     if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+        if creds and creds.expired and hasattr(creds, 'refresh_token') and creds.refresh_token:
+            from google.auth.transport.requests import Request
             try:
                 creds.refresh(Request())
                 logger.info("Token de OAuth2 refrescado con éxito")
-                # Actualizar token.json con el nuevo token refrescado
                 with open(token_path, "w") as token:
                     token.write(creds.to_json())
             except Exception as e:
@@ -211,19 +250,19 @@ def _obtener_credenciales_google():
                 )
                 return None
 
-            # Evitar flujo interactivo en entornos sin TTY (Railway, CI/CD, Docker)
+            # Evitar flujo interactivo en entornos sin TTY
             if not sys.stdin.isatty():
                 logger.warning(
                     "Entorno no interactivo detectado. No se puede iniciar el flujo OAuth2 de escritorio. "
-                    "Configura GOOGLE_CREDENTIALS_JSON como variable de entorno."
+                    "Configura GOOGLE_SERVICE_ACCOUNT_JSON como variable de entorno."
                 )
                 return None
 
             try:
+                from google_auth_oauthlib.flow import InstalledAppFlow
                 flow = InstalledAppFlow.from_client_secrets_file(client_secret_path, SCOPES)
                 creds = flow.run_local_server(port=0, open_browser=True)
 
-                # Guardar credenciales para la próxima ejecución
                 with open(token_path, "w") as token:
                     token.write(creds.to_json())
                 logger.info("Flujo interactivo completado y credenciales guardadas localmente")

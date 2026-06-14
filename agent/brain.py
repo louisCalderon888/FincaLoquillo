@@ -1,5 +1,9 @@
 # agent/brain.py — Cerebro del agente con OpenCode (API compatible con OpenAI)
 # Generado por AgentKit
+#
+# Soporta autenticación a Google via:
+#  1. GOOGLE_SERVICE_ACCOUNT_JSON (recomendado para producción, nunca expira)
+#  2. GOOGLE_CREDENTIALS_JSON (OAuth2 desktop, fallback)
 
 import os
 import yaml
@@ -113,7 +117,6 @@ OPENAI_TOOLS = [
 ]
 
 # Modelo por defecto: deepseek-v4-flash es el más económico de OpenCode Go
-# y soporta function calling. Puedes cambiarlo vía OPENCODE_MODEL.
 OPENCODE_MODEL = os.getenv("OPENCODE_MODEL", "deepseek-v4-flash")
 
 
@@ -122,7 +125,6 @@ OPENCODE_MODEL = os.getenv("OPENCODE_MODEL", "deepseek-v4-flash")
 # ─────────────────────────────────────────────────────────────
 
 def cargar_config_prompts() -> dict:
-    """Lee toda la configuración desde config/prompts.yaml."""
     try:
         with open("config/prompts.yaml", "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
@@ -132,19 +134,16 @@ def cargar_config_prompts() -> dict:
 
 
 def cargar_system_prompt() -> str:
-    """Lee el system prompt desde config/prompts.yaml."""
     config = cargar_config_prompts()
     return config.get("system_prompt", "Eres Loqui, el asistente virtual de Finca Loquillo en Buesaco. Responde en español.")
 
 
 def obtener_mensaje_error() -> str:
-    """Retorna el mensaje de error configurado en prompts.yaml."""
     config = cargar_config_prompts()
     return config.get("error_message", "Lo siento, estoy teniendo problemas técnicos. Por favor intenta de nuevo en unos minutos.")
 
 
 def obtener_mensaje_fallback() -> str:
-    """Retorna el mensaje de fallback configurado en prompts.yaml."""
     config = cargar_config_prompts()
     return config.get("fallback_message", "Disculpa, no entendí tu mensaje. ¿Podrías reformularlo?")
 
@@ -154,7 +153,6 @@ def obtener_mensaje_fallback() -> str:
 # ─────────────────────────────────────────────────────────────
 
 def _build_messages(mensaje: str, historial: list[dict]) -> list:
-    """Construye la lista de mensajes para OpenAI a partir del historial."""
     messages = [{"role": "system", "content": cargar_system_prompt()}]
     for msg in historial:
         role = "user" if msg["role"] == "user" else "assistant"
@@ -164,10 +162,6 @@ def _build_messages(mensaje: str, historial: list[dict]) -> list:
 
 
 def _ejecutar_funcion(name: str, args: dict) -> tuple[str, str | None]:
-    """
-    Ejecuta la herramienta solicitada por el modelo.
-    Retorna (resultado_texto, media_url_opcional).
-    """
     media_url = None
     resultado = ""
 
@@ -204,10 +198,7 @@ def _ejecutar_funcion(name: str, args: dict) -> tuple[str, str | None]:
 
 async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, str]:
     """
-    Genera una respuesta usando OpenCode (API compatible con OpenAI) y soporta retorno opcional de una URL de imagen.
-
-    Returns:
-        tuple: (texto_de_respuesta, media_url_opcional)
+    Genera una respuesta usando OpenCode (API compatible con OpenAI).
     """
     if not mensaje or len(mensaje.strip()) < 2:
         return obtener_mensaje_fallback(), None
@@ -218,7 +209,6 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
     messages = _build_messages(mensaje, historial)
 
     try:
-        # Primera llamada: el modelo puede decidir usar una herramienta
         response = openai_client.chat.completions.create(
             model=OPENCODE_MODEL,
             messages=messages,
@@ -231,9 +221,7 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
         response_message = response.choices[0].message
         media_url = None
 
-        # ¿El modelo pidió tool calls?
         if response_message.tool_calls:
-            # Agregar el mensaje original del asistente (con tool_calls) al historial
             messages.append(response_message)
 
             for tool_call in response_message.tool_calls:
@@ -249,7 +237,6 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
                 if url_imagen:
                     media_url = url_imagen
 
-                # Agregar el resultado de la función al historial
                 messages.append({
                     "tool_call_id": tool_call.id,
                     "role": "tool",
@@ -257,7 +244,6 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
                     "content": resultado_funcion
                 })
 
-            # Segunda llamada: el modelo genera respuesta final en lenguaje natural
             response_final = openai_client.chat.completions.create(
                 model=OPENCODE_MODEL,
                 messages=messages,
@@ -266,7 +252,6 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
             )
             return response_final.choices[0].message.content or obtener_mensaje_fallback(), media_url
 
-        # Sin tool calls: respuesta directa
         return response_message.content or obtener_mensaje_fallback(), None
 
     except Exception as e:
