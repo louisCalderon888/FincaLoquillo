@@ -435,7 +435,8 @@ def registrar_reserva(
 
     # Determinar si podemos intentar Google APIs de verdad
     tiene_credenciales = bool(
-        os.getenv("GOOGLE_CREDENTIALS_JSON")
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        or os.getenv("GOOGLE_CREDENTIALS_JSON")
         or os.path.exists("config/token.json")
         or os.path.exists("config/client_secret.json")
     )
