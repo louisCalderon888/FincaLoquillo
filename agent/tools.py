@@ -414,22 +414,32 @@ def registrar_reserva(
             try:
                 worksheet = sheet.worksheet("Reservas")
             except Exception:
-                worksheet = sheet.add_worksheet(title="Reservas", rows=1000, cols=10)
+                worksheet = sheet.add_worksheet(title="Reservas", rows=1000, cols=12)
                 encabezados = [
-                    "Fecha de Solicitud", "Nombre Cliente", "WhatsApp",
+                    "Fecha de Solicitud", "Nombre Cliente", "Teléfono", "WhatsApp",
                     "Email", "Glamping", "Fecha de Llegada", "N° Personas",
-                    "Estado Pago", "Notas"
+                    "Precio Total", "Abono (50%)", "Estado Pago", "Notas"
                 ]
                 worksheet.append_row(encabezados)
+
+            # Calcular precio según el glamping
+            if "vista hermosa" in glamping_normalizado.lower():
+                precio_total = 350000
+            else:
+                precio_total = 180000
+            abono = precio_total // 2
 
             nueva_fila = [
                 datetime.now().strftime("%Y-%m-%d %H:%M"),
                 nombre_cliente,
+                telefono,
                 whatsapp,
                 email,
                 glamping_normalizado,
                 fecha_reserva,
                 num_personas,
+                f"${precio_total:,} COP".replace(",", "."),
+                f"${abono:,} COP".replace(",", "."),
                 "Pendiente confirmación",
                 notas
             ]
