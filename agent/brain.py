@@ -12,7 +12,7 @@ load_dotenv()
 logger = logging.getLogger("agentkit")
 
 # Configurar cliente de OpenAI apuntando a OpenCode
-OPENCODE_BASE_URL = os.getenv("OPENCODE_BASE_URL", "https://api.opencode.ai/v1")
+OPENCODE_BASE_URL = os.getenv("OPENCODE_BASE_URL", "https://opencode.ai/zen/go/v1")
 opencode_api_key = os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY")
 
 if opencode_api_key:
@@ -112,9 +112,9 @@ OPENAI_TOOLS = [
     }
 ]
 
-# Modelo por defecto: gpt-4o-mini es rápido, barato y soporta function calling
-# Puedes cambiarlo vía variable de entorno OPENCODE_MODEL
-OPENCODE_MODEL = os.getenv("OPENCODE_MODEL", "gpt-4o-mini")
+# Modelo por defecto: deepseek-v4-flash es el más económico de OpenCode Go
+# y soporta function calling. Puedes cambiarlo vía OPENCODE_MODEL.
+OPENCODE_MODEL = os.getenv("OPENCODE_MODEL", "deepseek-v4-flash")
 
 
 # ─────────────────────────────────────────────────────────────
