@@ -5,7 +5,8 @@ import os
 import json
 import yaml
 import logging
-from datetime import datetime, timedelta
+import sys
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("agentkit")
 
@@ -136,9 +137,11 @@ def _construir_credenciales_desde_dict(creds_data: dict, scopes: list):
 def _obtener_credenciales_google():
     """
     Obtiene credenciales de Google.
-    1. Intenta cargar desde la variable de entorno GOOGLE_CREDENTIALS_JSON.
-    2. Intenta cargar desde el archivo local config/token.json.
-    3. Si no existe y está en local, inicia el flujo interactivo de OAuth2 Desktop con config/client_secret.json.
+
+    Orden de prioridad:
+    1. Variable de entorno GOOGLE_CREDENTIALS_JSON (Railway / producción).
+    2. Archivo local config/token.json (desarrollo local).
+    3. Flujo interactivo OAuth2 Desktop con config/client_secret.json (solo si hay TTY).
     """
     from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -148,14 +151,24 @@ def _obtener_credenciales_google():
         "https://www.googleapis.com/auth/calendar"
     ]
 
+    def _validar_campos_minimos(data: dict) -> bool:
+        campos = ["client_id", "client_secret", "refresh_token"]
+        return all(data.get(c) for c in campos)
+
     # 1. Intentar cargar desde la variable de entorno GOOGLE_CREDENTIALS_JSON
     google_creds_env = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if google_creds_env:
         try:
             creds_data = json.loads(google_creds_env)
+            if not _validar_campos_minimos(creds_data):
+                logger.error("GOOGLE_CREDENTIALS_JSON no tiene los campos mínimos requeridos.")
+                return None
             creds = _construir_credenciales_desde_dict(creds_data, SCOPES)
             if creds:
+                logger.info("Credenciales cargadas desde variable de entorno GOOGLE_CREDENTIALS_JSON")
                 return creds
+        except json.JSONDecodeError as e:
+            logger.error(f"GOOGLE_CREDENTIALS_JSON no es un JSON válido: {e}")
         except Exception as e:
             logger.error(f"Error cargando credenciales desde GOOGLE_CREDENTIALS_JSON: {e}")
 
@@ -168,10 +181,13 @@ def _obtener_credenciales_google():
         try:
             with open(token_path, "r") as f:
                 token_data = json.load(f)
+            if not _validar_campos_minimos(token_data):
+                logger.error("El archivo de token local no tiene los campos mínimos requeridos.")
+                return None
             creds = _construir_credenciales_desde_dict(token_data, SCOPES)
-            logger.info("Cargadas credenciales desde config/token.json")
+            logger.info("Credenciales cargadas desde archivo de token local")
         except Exception as e:
-            logger.error(f"Error cargando token.json: {e}")
+            logger.error(f"Error cargando credenciales locales: {e}")
             creds = None
 
     # Si no hay credenciales válidas, solicitar al usuario que inicie sesión
@@ -190,20 +206,27 @@ def _obtener_credenciales_google():
         if not creds:
             if not os.path.exists(client_secret_path):
                 logger.warning(
-                    f"No se encontró {client_secret_path} ni variable GOOGLE_CREDENTIALS_JSON. "
+                    "No se encontraron credenciales de Google configuradas. "
                     "Se utilizará el modo simulado (mock)."
+                )
+                return None
+
+            # Evitar flujo interactivo en entornos sin TTY (Railway, CI/CD, Docker)
+            if not sys.stdin.isatty():
+                logger.warning(
+                    "Entorno no interactivo detectado. No se puede iniciar el flujo OAuth2 de escritorio. "
+                    "Configura GOOGLE_CREDENTIALS_JSON como variable de entorno."
                 )
                 return None
 
             try:
                 flow = InstalledAppFlow.from_client_secrets_file(client_secret_path, SCOPES)
-                # Ejecutar servidor local para capturar el código de autorización
                 creds = flow.run_local_server(port=0, open_browser=True)
-                
+
                 # Guardar credenciales para la próxima ejecución
                 with open(token_path, "w") as token:
                     token.write(creds.to_json())
-                logger.info("Flujo interactivo completado y credenciales guardadas en config/token.json")
+                logger.info("Flujo interactivo completado y credenciales guardadas localmente")
             except Exception as e:
                 logger.error(f"Error en flujo interactivo OAuth2: {e}")
                 return None
@@ -258,9 +281,9 @@ def obtener_fechas_ocupadas_calendar(glamping_normalizado: str) -> list[str]:
     try:
         service = _obtener_servicio_calendar()
         
-        ahora = datetime.utcnow()
-        time_min = ahora.isoformat() + 'Z'
-        time_max = (ahora + timedelta(days=90)).isoformat() + 'Z'
+        ahora = datetime.now(timezone.utc)
+        time_min = ahora.isoformat()
+        time_max = (ahora + timedelta(days=90)).isoformat()
         
         events_result = service.events().list(
             calendarId=calendar_id,

@@ -31,3 +31,6 @@ Thumbs.db
 config/token.json
 config/client_secret.json
 config/google_credentials.json
+
+# Archivo temporal generado por helper de Railway
+.railway_google_creds.tmp
