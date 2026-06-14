@@ -206,7 +206,7 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
     try:
         # Primera llamada: Gemini puede decidir usar una herramienta
         response = genai_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-1.5-flash-8b",
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
@@ -243,7 +243,7 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
 
             # Segunda llamada: Gemini genera respuesta final en lenguaje natural
             response_final = genai_client.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-1.5-flash-8b",
                 contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
