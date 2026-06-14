@@ -1,21 +1,23 @@
-# agent/brain.py — Cerebro del agente con soporte de Function Calling para Gemini API
+# agent/brain.py — Cerebro del agente con Google GenAI (SDK oficial)
 # Generado por AgentKit
 
 import os
 import yaml
 import logging
 import json
-import google.generativeai as genai
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
 
-# Configurar API Key de Gemini
+# Configurar cliente de Google GenAI
 api_key = os.getenv("GEMINI_API_KEY")
 if api_key:
-    genai.configure(api_key=api_key)
+    genai_client = genai.Client(api_key=api_key)
 else:
+    genai_client = None
     logger.warning("GEMINI_API_KEY no encontrada en las variables de entorno.")
 
 from agent.tools import (
@@ -25,6 +27,84 @@ from agent.tools import (
     registrar_reserva
 )
 
+
+# ─────────────────────────────────────────────────────────────
+# DECLARACIONES DE HERRAMIENTAS PARA GEMINI
+# ─────────────────────────────────────────────────────────────
+
+GEMINI_TOOLS = [
+    types.Tool(function_declarations=[
+        types.FunctionDeclaration(
+            name="verificar_disponibilidad_glamping",
+            description="Verifica si un glamping está disponible para una fecha específica en formato YYYY-MM-DD.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "glamping": {
+                        "type": "string",
+                        "description": "Nombre del glamping: 'Nido de Amor' o 'Vista Hermosa'."
+                    },
+                    "fecha": {
+                        "type": "string",
+                        "description": "Fecha a consultar en formato YYYY-MM-DD."
+                    }
+                },
+                "required": ["glamping", "fecha"]
+            }
+        ),
+        types.FunctionDeclaration(
+            name="verificar_disponibilidad_rango",
+            description="Consulta las próximas fechas disponibles para un glamping en los próximos 30 días.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "glamping": {
+                        "type": "string",
+                        "description": "Nombre del glamping: 'Nido de Amor' o 'Vista Hermosa'."
+                    }
+                },
+                "required": ["glamping"]
+            }
+        ),
+        types.FunctionDeclaration(
+            name="obtener_imagen_glamping",
+            description="Retorna la URL de una imagen real del glamping solicitado.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "glamping": {
+                        "type": "string",
+                        "description": "Nombre del glamping: 'Nido de Amor' o 'Vista Hermosa'."
+                    }
+                },
+                "required": ["glamping"]
+            }
+        ),
+        types.FunctionDeclaration(
+            name="registrar_reserva",
+            description="Registra una solicitud de reserva pendiente para un glamping.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "nombre_cliente": {"type": "string", "description": "Nombre completo del cliente."},
+                    "telefono": {"type": "string", "description": "Número de teléfono del cliente."},
+                    "email": {"type": "string", "description": "Correo electrónico del cliente."},
+                    "whatsapp": {"type": "string", "description": "Número de WhatsApp de contacto."},
+                    "glamping": {"type": "string", "description": "Nombre del glamping: 'Nido de Amor' o 'Vista Hermosa'."},
+                    "fecha_reserva": {"type": "string", "description": "Fecha de llegada en formato YYYY-MM-DD."},
+                    "num_personas": {"type": "string", "description": "Cantidad de personas (default '1')."},
+                    "notas": {"type": "string", "description": "Notas u observaciones especiales."}
+                },
+                "required": ["nombre_cliente", "telefono", "email", "whatsapp", "glamping", "fecha_reserva"]
+            }
+        )
+    ])
+]
+
+
+# ─────────────────────────────────────────────────────────────
+# CARGA DE CONFIGURACIÓN
+# ─────────────────────────────────────────────────────────────
 
 def cargar_config_prompts() -> dict:
     """Lee toda la configuración desde config/prompts.yaml."""
@@ -54,133 +134,128 @@ def obtener_mensaje_fallback() -> str:
     return config.get("fallback_message", "Disculpa, no entendí tu mensaje. ¿Podrías reformularlo?")
 
 
+# ─────────────────────────────────────────────────────────────
+# GENERACIÓN DE RESPUESTAS
+# ─────────────────────────────────────────────────────────────
+
+def _build_contents(mensaje: str, historial: list[dict]) -> list:
+    """Construye la lista de contents para Google GenAI a partir del historial."""
+    contents = []
+    for msg in historial:
+        role = "user" if msg["role"] == "user" else "model"
+        contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
+    contents.append(types.Content(role="user", parts=[types.Part(text=mensaje)]))
+    return contents
+
+
+def _ejecutar_funcion(name: str, args: dict) -> tuple[str, str | None]:
+    """
+    Ejecuta la herramienta solicitada por Gemini.
+    Retorna (resultado_texto, media_url_opcional).
+    """
+    media_url = None
+    resultado = ""
+
+    if name == "verificar_disponibilidad_glamping":
+        resultado = verificar_disponibilidad_glamping(
+            glamping=args.get("glamping", ""),
+            fecha=args.get("fecha", "")
+        )
+    elif name == "verificar_disponibilidad_rango":
+        resultado = verificar_disponibilidad_rango(
+            glamping=args.get("glamping", "")
+        )
+    elif name == "obtener_imagen_glamping":
+        media_url = obtener_imagen_glamping(
+            glamping=args.get("glamping", "")
+        )
+        resultado = f"URL de imagen obtenida: {media_url}."
+    elif name == "registrar_reserva":
+        resultado = registrar_reserva(
+            nombre_cliente=args.get("nombre_cliente", ""),
+            telefono=args.get("telefono", ""),
+            email=args.get("email", ""),
+            whatsapp=args.get("whatsapp", ""),
+            glamping=args.get("glamping", ""),
+            fecha_reserva=args.get("fecha_reserva", ""),
+            num_personas=args.get("num_personas", "1"),
+            notas=args.get("notas", "")
+        )
+    else:
+        resultado = f"Función desconocida: {name}"
+
+    return resultado, media_url
+
+
 async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, str]:
     """
-    Genera una respuesta usando Gemini API y soporta retorno opcional de una URL de imagen (media_url).
-    
+    Genera una respuesta usando Google GenAI y soporta retorno opcional de una URL de imagen.
+
     Returns:
         tuple: (texto_de_respuesta, media_url_opcional)
     """
     if not mensaje or len(mensaje.strip()) < 2:
         return obtener_mensaje_fallback(), None
 
-    api_key_env = os.getenv("GEMINI_API_KEY")
-    if not api_key_env:
+    if not genai_client:
         return "[Modo Simulado - Loqui]: ¡Hola! Para responderte con IA necesito la clave de Gemini en el .env.", None
 
     system_prompt = cargar_system_prompt()
-
-    # Formatear el historial
-    contents = []
-    for msg in historial:
-        role = "user" if msg["role"] == "user" else "model"
-        contents.append({
-            "role": role,
-            "parts": [msg["content"]]
-        })
-
-    # Mensaje actual
-    contents.append({
-        "role": "user",
-        "parts": [mensaje]
-    })
+    contents = _build_contents(mensaje, historial)
 
     try:
-        # Declaramos las herramientas que Gemini puede usar
-        model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
-            system_instruction=system_prompt,
-            tools=[
-                verificar_disponibilidad_glamping,
-                verificar_disponibilidad_rango,
-                obtener_imagen_glamping,
-                registrar_reserva
-            ]
-        )
-
-        import asyncio
-        loop = asyncio.get_event_loop()
-        
-        # Llamar a Gemini de forma asíncrona
-        response = await loop.run_in_executor(
-            None,
-            lambda: model.generate_content(contents)
+        # Primera llamada: Gemini puede decidir usar una herramienta
+        response = genai_client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                tools=GEMINI_TOOLS,
+                temperature=0.7
+            )
         )
 
         media_url = None
-        respuesta_texto = ""
 
-        # Verificar si Gemini decidió llamar a alguna función (Function Call)
-        if response.candidates and response.candidates[0].content.parts:
-            part = response.candidates[0].content.parts[0]
-            
-            # ¿Es una llamada a función?
-            if part.function_call:
-                function_call = part.function_call
+        # ¿Gemini pidió function calls?
+        if response.function_calls:
+            for function_call in response.function_calls:
                 name = function_call.name
-                args = function_call.args
-                
+                args = dict(function_call.args) if function_call.args else {}
                 logger.info(f"Gemini solicitó llamar a la función: {name} con argumentos {args}")
-                 # Ejecutar la función solicitada
-                resultado_funcion = ""
-                if name == "verificar_disponibilidad_glamping":
-                    glamping = args.get("glamping")
-                    fecha = args.get("fecha")
-                    resultado_funcion = verificar_disponibilidad_glamping(glamping, fecha)
-                    
-                elif name == "verificar_disponibilidad_rango":
-                    glamping = args.get("glamping")
-                    resultado_funcion = verificar_disponibilidad_rango(glamping)
- 
-                elif name == "registrar_reserva":
-                    resultado_funcion = registrar_reserva(
-                        nombre_cliente=args.get("nombre_cliente", ""),
-                        telefono=args.get("telefono", ""),
-                        email=args.get("email", ""),
-                        whatsapp=args.get("whatsapp", ""),
-                        glamping=args.get("glamping", ""),
-                        fecha_reserva=args.get("fecha_reserva", ""),
-                        num_personas=args.get("num_personas", "1"),
-                        notas=args.get("notas", "")
-                    )
- 
-                elif name == "obtener_imagen_glamping":
-                    glamping = args.get("glamping")
-                    media_url = obtener_imagen_glamping(glamping)
-                    resultado_funcion = f"URL de imagen obtenida con éxito: {media_url}. Envía un mensaje amigable al cliente confirmando el envío de la foto."
 
-                # Agregar la llamada a la función y el resultado al historial en formato dict compatible
-                contents.append({
-                    "role": "model",
-                    "parts": [{
-                        "function_call": {
-                            "name": name,
-                            "args": dict(args)
-                        }
-                    }]
-                })
-                contents.append({
-                    "role": "function",
-                    "parts": [{
-                        "function_response": {
-                            "name": name,
-                            "response": {"result": resultado_funcion}
-                        }
-                    }]
-                })
-                
-                response_final = await loop.run_in_executor(
-                    None,
-                    lambda: model.generate_content(contents)
+                resultado_funcion, url_imagen = _ejecutar_funcion(name, args)
+                if url_imagen:
+                    media_url = url_imagen
+
+                # Agregar la llamada y el resultado al historial
+                contents.append(types.Content(
+                    role="model",
+                    parts=[types.Part(function_call=types.FunctionCall(name=name, args=args))]
+                ))
+                contents.append(types.Content(
+                    role="user",
+                    parts=[types.Part(function_response=types.FunctionResponse(
+                        name=name,
+                        response={"result": resultado_funcion}
+                    ))]
+                ))
+
+            # Segunda llamada: Gemini genera respuesta final en lenguaje natural
+            response_final = genai_client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    tools=GEMINI_TOOLS,
+                    temperature=0.7
                 )
-                respuesta_texto = response_final.text
-            else:
-                respuesta_texto = response.text
-        else:
-            respuesta_texto = response.text
+            )
+            return response_final.text or obtener_mensaje_fallback(), media_url
 
-        return respuesta_texto, media_url
+        # Sin function calls: respuesta directa
+        return response.text or obtener_mensaje_fallback(), None
 
     except Exception as e:
-        logger.error(f"Error Gemini API con Function Calling: {e}")
+        logger.error(f"Error Google GenAI con Function Calling: {e}")
         return obtener_mensaje_error(), None
