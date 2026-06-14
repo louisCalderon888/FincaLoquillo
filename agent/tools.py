@@ -10,6 +10,25 @@ from datetime import datetime, timedelta
 logger = logging.getLogger("agentkit")
 
 # ─────────────────────────────────────────────────────────────
+# IMPORTS ROBUSTOS DE LIBRERÍAS GOOGLE
+# ─────────────────────────────────────────────────────────────
+GSPREAD_AVAILABLE = False
+try:
+    import gspread
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    logger.warning("gspread no está instalado. Las reservas usarán modo simulado.")
+
+GOOGLE_API_CLIENT_AVAILABLE = False
+try:
+    from googleapiclient.discovery import build
+    GOOGLE_API_CLIENT_AVAILABLE = True
+except ImportError:
+    logger.warning("google-api-python-client no está instalado. Calendar usará modo simulado.")
+
+logger.info(f"Google libs disponibles — gspread: {GSPREAD_AVAILABLE}, googleapiclient: {GOOGLE_API_CLIENT_AVAILABLE}")
+
+# ─────────────────────────────────────────────────────────────
 # BASE DE DATOS DE DISPONIBILIDAD EN MEMORIA (FALLBACK MOCK)
 # ─────────────────────────────────────────────────────────────
 RESERVAS_MOCK = {
@@ -194,7 +213,8 @@ def _obtener_credenciales_google():
 
 def _obtener_cliente_sheets():
     """Autentica con Google Sheets usando las credenciales obtenidas."""
-    import gspread
+    if not GSPREAD_AVAILABLE:
+        raise RuntimeError("gspread no está instalado.")
     creds = _obtener_credenciales_google()
     if not creds:
         raise FileNotFoundError("Credenciales OAuth2 no configuradas correctamente.")
@@ -203,7 +223,8 @@ def _obtener_cliente_sheets():
 
 def _obtener_servicio_calendar():
     """Autentica y obtiene servicio de Google Calendar API."""
-    from googleapiclient.discovery import build
+    if not GOOGLE_API_CLIENT_AVAILABLE:
+        raise RuntimeError("google-api-python-client no está instalado.")
     creds = _obtener_credenciales_google()
     if not creds:
         raise FileNotFoundError("Credenciales OAuth2 no configuradas correctamente.")
@@ -340,6 +361,8 @@ def registrar_reserva(
 ) -> str:
     """
     Registra una reserva pendiente en Google Sheets y bloquea la fecha en Google Calendar.
+    Si las credenciales o librerías no están disponibles, usa modo simulado (fallback) y
+    lo informa claramente al cliente.
     """
     glamping_normalizado = normalizar_nombre_glamping(glamping)
     if not glamping_normalizado:
@@ -348,61 +371,52 @@ def registrar_reserva(
     SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
     CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "")
 
-    # Fallback local / simulación si no se ha configurado OAuth ni credenciales
-    if not os.path.exists("config/client_secret.json") and not os.path.exists("config/token.json"):
-        logger.warning("No se detectan credenciales de Google OAuth. Simulando reserva en local.")
-        key = glamping_normalizado.lower()
-        if key in RESERVAS_MOCK:
-            if fecha_reserva not in RESERVAS_MOCK[key]:
-                RESERVAS_MOCK[key].append(fecha_reserva)
-        return (
-            f"¡Solicitud de Reserva Registrada (Modo Simulación)! 🎉\n\n"
-            f"📋 Resumen:\n"
-            f"- Nombre: {nombre_cliente}\n"
-            f"- WhatsApp: {whatsapp}\n"
-            f"- Email: {email}\n"
-            f"- Glamping: {glamping_normalizado}\n"
-            f"- Fecha: {fecha_reserva}\n"
-            f"- Personas: {num_personas}\n"
-            f"- Notas: {notas}\n"
-            f"- Estado: Pendiente confirmación\n\n"
-            "El equipo de Finca Loquillo te contactará pronto para confirmar el abono del 50%. 🌲"
-        )
+    # Determinar si podemos intentar Google APIs de verdad
+    tiene_credenciales = bool(
+        os.getenv("GOOGLE_CREDENTIALS_JSON")
+        or os.path.exists("config/token.json")
+        or os.path.exists("config/client_secret.json")
+    )
+    puede_usar_sheets = bool(SHEET_ID and GSPREAD_AVAILABLE and tiene_credenciales)
+    puede_usar_calendar = bool(CALENDAR_ID and GOOGLE_API_CLIENT_AVAILABLE and tiene_credenciales)
 
-    # Registrar en Google Sheets
-    try:
-        gc = _obtener_cliente_sheets()
-        sheet = gc.open_by_key(SHEET_ID)
+    sheets_ok = False
+    calendar_ok = False
 
+    if puede_usar_sheets:
         try:
-            worksheet = sheet.worksheet("Reservas")
-        except Exception:
-            worksheet = sheet.add_worksheet(title="Reservas", rows=1000, cols=10)
-            encabezados = [
-                "Fecha de Solicitud", "Nombre Cliente", "WhatsApp",
-                "Email", "Glamping", "Fecha de Llegada", "N° Personas",
-                "Estado Pago", "Notas"
+            gc = _obtener_cliente_sheets()
+            sheet = gc.open_by_key(SHEET_ID)
+
+            try:
+                worksheet = sheet.worksheet("Reservas")
+            except Exception:
+                worksheet = sheet.add_worksheet(title="Reservas", rows=1000, cols=10)
+                encabezados = [
+                    "Fecha de Solicitud", "Nombre Cliente", "WhatsApp",
+                    "Email", "Glamping", "Fecha de Llegada", "N° Personas",
+                    "Estado Pago", "Notas"
+                ]
+                worksheet.append_row(encabezados)
+
+            nueva_fila = [
+                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                nombre_cliente,
+                whatsapp,
+                email,
+                glamping_normalizado,
+                fecha_reserva,
+                num_personas,
+                "Pendiente confirmación",
+                notas
             ]
-            worksheet.append_row(encabezados)
+            worksheet.append_row(nueva_fila)
+            logger.info(f"Fila agregada a Google Sheets para {nombre_cliente}")
+            sheets_ok = True
+        except Exception as e:
+            logger.error(f"Error escribiendo en Google Sheets: {e}")
 
-        nueva_fila = [
-            datetime.now().strftime("%Y-%m-%d %H:%M"),
-            nombre_cliente,
-            whatsapp,
-            email,
-            glamping_normalizado,
-            fecha_reserva,
-            num_personas,
-            "Pendiente confirmación",
-            notas
-        ]
-        worksheet.append_row(nueva_fila)
-        logger.info(f"Fila agregada a Google Sheets para {nombre_cliente}")
-    except Exception as e:
-        logger.error(f"Error escribiendo en Google Sheets: {e}")
-
-    # Crear evento en Google Calendar para bloquear la fecha
-    if CALENDAR_ID:
+    if puede_usar_calendar:
         try:
             service = _obtener_servicio_calendar()
             evento = {
@@ -417,27 +431,49 @@ def registrar_reserva(
             }
             service.events().insert(calendarId=CALENDAR_ID, body=evento).execute()
             logger.info(f"Evento creado en Google Calendar para {fecha_reserva}")
+            calendar_ok = True
         except Exception as e:
             logger.error(f"Error creando evento en Google Calendar: {e}")
-            
+
+    # Actualizar mock local (también usado como fallback de disponibilidad)
     key = glamping_normalizado.lower()
     if key in RESERVAS_MOCK:
         if fecha_reserva not in RESERVAS_MOCK[key]:
             RESERVAS_MOCK[key].append(fecha_reserva)
 
-    resumen = (
-        f"¡Solicitud de reserva registrada con éxito! 🎉\n\n"
-        f"📋 Detalle de la Solicitud:\n"
-        f"- Nombre: {nombre_cliente}\n"
-        f"- WhatsApp: {whatsapp}\n"
-        f"- Email: {email}\n"
-        f"- Glamping: {glamping_normalizado}\n"
-        f"- Fecha de llegada: {fecha_reserva}\n"
-        f"- Personas: {num_personas}\n"
-        f"- Notas: {notas}\n"
-        f"- Estado: Pendiente confirmación\n\n"
-        f"Para confirmar tu reserva, realiza el abono del 50% y envía el comprobante por este medio. "
-        f"Un miembro del equipo revisará la información y te dará confirmación definitiva. ¡Te esperamos! 🌲"
-    )
+    # Construir mensaje según el resultado real
+    if sheets_ok or calendar_ok:
+        resumen = (
+            f"¡Solicitud de reserva registrada con éxito! 🎉\n\n"
+            f"📋 Detalle de la Solicitud:\n"
+            f"- Nombre: {nombre_cliente}\n"
+            f"- WhatsApp: {whatsapp}\n"
+            f"- Email: {email}\n"
+            f"- Glamping: {glamping_normalizado}\n"
+            f"- Fecha de llegada: {fecha_reserva}\n"
+            f"- Personas: {num_personas}\n"
+            f"- Notas: {notas}\n"
+            f"- Estado: Pendiente confirmación\n\n"
+            f"Para confirmar tu reserva, realiza el abono del 50% y envía el comprobante por este medio. "
+            f"Un miembro del equipo revisará la información y te dará confirmación definitiva. ¡Te esperamos! 🌲"
+        )
+    else:
+        # Modo fallback: la reserva queda en memoria local pero no en Google
+        logger.warning("Reserva guardada en modo fallback (memoria local). No se pudo escribir en Google Sheets/Calendar.")
+        resumen = (
+            f"¡He tomado tu solicitud de reserva! 🎉\n\n"
+            f"📋 Detalle de la Solicitud:\n"
+            f"- Nombre: {nombre_cliente}\n"
+            f"- WhatsApp: {whatsapp}\n"
+            f"- Email: {email}\n"
+            f"- Glamping: {glamping_normalizado}\n"
+            f"- Fecha de llegada: {fecha_reserva}\n"
+            f"- Personas: {num_personas}\n"
+            f"- Notas: {notas}\n"
+            f"- Estado: Pendiente confirmación\n\n"
+            f"⚠️ Nota: En este momento no pude sincronizar automáticamente con nuestro calendario. "
+            f"Un miembro del equipo te contactará muy pronto para confirmar disponibilidad y el abono del 50%. "
+            f"Disculpa las molestias. ¡Te esperamos! 🌲"
+        )
 
     return resumen
