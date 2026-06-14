@@ -1,4 +1,4 @@
-# agent/brain.py — Cerebro del agente con Google GenAI (SDK oficial)
+# agent/brain.py — Cerebro del agente con OpenCode (API compatible con OpenAI)
 # Generado por AgentKit
 
 import os
@@ -6,19 +6,20 @@ import yaml
 import logging
 import json
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
 
-# Configurar cliente de Google GenAI
-api_key = os.getenv("GEMINI_API_KEY")
-if api_key:
-    genai_client = genai.Client(api_key=api_key)
+# Configurar cliente de OpenAI apuntando a OpenCode
+OPENCODE_BASE_URL = os.getenv("OPENCODE_BASE_URL", "https://api.opencode.ai/v1")
+opencode_api_key = os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY")
+
+if opencode_api_key:
+    openai_client = OpenAI(base_url=OPENCODE_BASE_URL, api_key=opencode_api_key)
 else:
-    genai_client = None
-    logger.warning("GEMINI_API_KEY no encontrada en las variables de entorno.")
+    openai_client = None
+    logger.warning("OPENCODE_API_KEY no encontrada en las variables de entorno.")
 
 from agent.tools import (
     verificar_disponibilidad_glamping,
@@ -29,15 +30,16 @@ from agent.tools import (
 
 
 # ─────────────────────────────────────────────────────────────
-# DECLARACIONES DE HERRAMIENTAS PARA GEMINI
+# DECLARACIONES DE HERRAMIENTAS PARA OPENAI FUNCTION CALLING
 # ─────────────────────────────────────────────────────────────
 
-GEMINI_TOOLS = [
-    types.Tool(function_declarations=[
-        types.FunctionDeclaration(
-            name="verificar_disponibilidad_glamping",
-            description="Verifica si un glamping está disponible para una fecha específica en formato YYYY-MM-DD.",
-            parameters={
+OPENAI_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "verificar_disponibilidad_glamping",
+            "description": "Verifica si un glamping está disponible para una fecha específica en formato YYYY-MM-DD.",
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "glamping": {
@@ -51,11 +53,14 @@ GEMINI_TOOLS = [
                 },
                 "required": ["glamping", "fecha"]
             }
-        ),
-        types.FunctionDeclaration(
-            name="verificar_disponibilidad_rango",
-            description="Consulta las próximas fechas disponibles para un glamping en los próximos 30 días.",
-            parameters={
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "verificar_disponibilidad_rango",
+            "description": "Consulta las próximas fechas disponibles para un glamping en los próximos 30 días.",
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "glamping": {
@@ -65,11 +70,14 @@ GEMINI_TOOLS = [
                 },
                 "required": ["glamping"]
             }
-        ),
-        types.FunctionDeclaration(
-            name="obtener_imagen_glamping",
-            description="Retorna la URL de una imagen real del glamping solicitado.",
-            parameters={
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "obtener_imagen_glamping",
+            "description": "Retorna la URL de una imagen real del glamping solicitado.",
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "glamping": {
@@ -79,11 +87,14 @@ GEMINI_TOOLS = [
                 },
                 "required": ["glamping"]
             }
-        ),
-        types.FunctionDeclaration(
-            name="registrar_reserva",
-            description="Registra una solicitud de reserva pendiente para un glamping.",
-            parameters={
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "registrar_reserva",
+            "description": "Registra una solicitud de reserva pendiente para un glamping.",
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "nombre_cliente": {"type": "string", "description": "Nombre completo del cliente."},
@@ -97,9 +108,13 @@ GEMINI_TOOLS = [
                 },
                 "required": ["nombre_cliente", "telefono", "email", "whatsapp", "glamping", "fecha_reserva"]
             }
-        )
-    ])
+        }
+    }
 ]
+
+# Modelo por defecto: gpt-4o-mini es rápido, barato y soporta function calling
+# Puedes cambiarlo vía variable de entorno OPENCODE_MODEL
+OPENCODE_MODEL = os.getenv("OPENCODE_MODEL", "gpt-4o-mini")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -138,19 +153,19 @@ def obtener_mensaje_fallback() -> str:
 # GENERACIÓN DE RESPUESTAS
 # ─────────────────────────────────────────────────────────────
 
-def _build_contents(mensaje: str, historial: list[dict]) -> list:
-    """Construye la lista de contents para Google GenAI a partir del historial."""
-    contents = []
+def _build_messages(mensaje: str, historial: list[dict]) -> list:
+    """Construye la lista de mensajes para OpenAI a partir del historial."""
+    messages = [{"role": "system", "content": cargar_system_prompt()}]
     for msg in historial:
-        role = "user" if msg["role"] == "user" else "model"
-        contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
-    contents.append(types.Content(role="user", parts=[types.Part(text=mensaje)]))
-    return contents
+        role = "user" if msg["role"] == "user" else "assistant"
+        messages.append({"role": role, "content": msg["content"]})
+    messages.append({"role": "user", "content": mensaje})
+    return messages
 
 
 def _ejecutar_funcion(name: str, args: dict) -> tuple[str, str | None]:
     """
-    Ejecuta la herramienta solicitada por Gemini.
+    Ejecuta la herramienta solicitada por el modelo.
     Retorna (resultado_texto, media_url_opcional).
     """
     media_url = None
@@ -189,7 +204,7 @@ def _ejecutar_funcion(name: str, args: dict) -> tuple[str, str | None]:
 
 async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, str]:
     """
-    Genera una respuesta usando Google GenAI y soporta retorno opcional de una URL de imagen.
+    Genera una respuesta usando OpenCode (API compatible con OpenAI) y soporta retorno opcional de una URL de imagen.
 
     Returns:
         tuple: (texto_de_respuesta, media_url_opcional)
@@ -197,65 +212,63 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, s
     if not mensaje or len(mensaje.strip()) < 2:
         return obtener_mensaje_fallback(), None
 
-    if not genai_client:
-        return "[Modo Simulado - Loqui]: ¡Hola! Para responderte con IA necesito la clave de Gemini en el .env.", None
+    if not openai_client:
+        return "[Modo Simulado - Loqui]: ¡Hola! Para responderte con IA necesito configurar OPENCODE_API_KEY.", None
 
-    system_prompt = cargar_system_prompt()
-    contents = _build_contents(mensaje, historial)
+    messages = _build_messages(mensaje, historial)
 
     try:
-        # Primera llamada: Gemini puede decidir usar una herramienta
-        response = genai_client.models.generate_content(
-            model="gemini-1.5-flash-8b",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                tools=GEMINI_TOOLS,
-                temperature=0.7
-            )
+        # Primera llamada: el modelo puede decidir usar una herramienta
+        response = openai_client.chat.completions.create(
+            model=OPENCODE_MODEL,
+            messages=messages,
+            tools=OPENAI_TOOLS,
+            tool_choice="auto",
+            temperature=0.7,
+            max_tokens=800
         )
 
+        response_message = response.choices[0].message
         media_url = None
 
-        # ¿Gemini pidió function calls?
-        if response.function_calls:
-            for function_call in response.function_calls:
-                name = function_call.name
-                args = dict(function_call.args) if function_call.args else {}
-                logger.info(f"Gemini solicitó llamar a la función: {name} con argumentos {args}")
+        # ¿El modelo pidió tool calls?
+        if response_message.tool_calls:
+            # Agregar el mensaje original del asistente (con tool_calls) al historial
+            messages.append(response_message)
+
+            for tool_call in response_message.tool_calls:
+                name = tool_call.function.name
+                try:
+                    args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
+                except json.JSONDecodeError:
+                    args = {}
+
+                logger.info(f"OpenCode solicitó llamar a la función: {name} con argumentos {args}")
 
                 resultado_funcion, url_imagen = _ejecutar_funcion(name, args)
                 if url_imagen:
                     media_url = url_imagen
 
-                # Agregar la llamada y el resultado al historial
-                contents.append(types.Content(
-                    role="model",
-                    parts=[types.Part(function_call=types.FunctionCall(name=name, args=args))]
-                ))
-                contents.append(types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=types.FunctionResponse(
-                        name=name,
-                        response={"result": resultado_funcion}
-                    ))]
-                ))
+                # Agregar el resultado de la función al historial
+                messages.append({
+                    "tool_call_id": tool_call.id,
+                    "role": "tool",
+                    "name": name,
+                    "content": resultado_funcion
+                })
 
-            # Segunda llamada: Gemini genera respuesta final en lenguaje natural
-            response_final = genai_client.models.generate_content(
-                model="gemini-1.5-flash-8b",
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    tools=GEMINI_TOOLS,
-                    temperature=0.7
-                )
+            # Segunda llamada: el modelo genera respuesta final en lenguaje natural
+            response_final = openai_client.chat.completions.create(
+                model=OPENCODE_MODEL,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=800
             )
-            return response_final.text or obtener_mensaje_fallback(), media_url
+            return response_final.choices[0].message.content or obtener_mensaje_fallback(), media_url
 
-        # Sin function calls: respuesta directa
-        return response.text or obtener_mensaje_fallback(), None
+        # Sin tool calls: respuesta directa
+        return response_message.content or obtener_mensaje_fallback(), None
 
     except Exception as e:
-        logger.error(f"Error Google GenAI con Function Calling: {e}")
+        logger.error(f"Error OpenCode/OpenAI API con Function Calling: {e}")
         return obtener_mensaje_error(), None
